@@ -5,6 +5,7 @@ Live on the Onyx testnet at [onyx.testnets.gno.land/r/g1lnkytfqcjwllws63gvf0mv9y
 An on-chain bounty board and contribution-reputation system for gno.land. It lets people fund work, track it, and turn finished work into a record anyone can check.
 
 - **Escrowed bounties.** Anyone can post a task funded with GNOT (or any native coin) or any token in the GRC20 registry, split into milestones. Funds stay in the realm until the bounty's reviewers approve a milestone.
+- **Campaigns.** A fixed reward for each person who does a small task, up to a set number of people: 10 GNOT each to the first 100 people who write about something is one campaign holding 1000 GNOT. A reviewer checks each claim before it pays.
 - **Records of completed work.** Every payout writes a record: who did the work, who funded it, who vouched for it, how much it paid, which transaction released the funds, and a link to the PR, realm path or proposal.
 - **Reputation other realms can use.** Scores are built from those records and weighted by the reputation of the reviewers. Any realm can gate on them with one import.
 - **No separate website needed.** Every page is rendered by the realms themselves and served by gnoweb.
@@ -14,9 +15,11 @@ An on-chain bounty board and contribution-reputation system for gno.land. It let
 ```
 gno.land/
   p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounty/v0      bounty state machine: milestones, quorum, disputes, cancellation (pure, no coins)
+  p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaign/v0    campaign state machine: slots, claims, approvals, refunds (pure, no coins)
   p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/trust/v0       scoring rules: reviewer trust, record points, levels (pure)
   r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall                landing page
   r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties       escrow + bounty board (native coins and GRC20)
+  r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaigns      escrow for many-hands tasks: fixed reward per claim, fixed slots
   r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/reputation     work records, scores, leaderboard, the import-able API
   r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/govdao         optional: reputation as an input to GovDAO membership
   r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/testing/gld20  throwaway GRC20 used by tests; do not deploy
@@ -37,6 +40,10 @@ The rules live in `p/`, free of chain effects, so they can be tested exhaustivel
 | `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties:<id>` | bounty, milestones, disputes, applications, one-click action links |
 | `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties:u/<addr>` | every bounty an address is involved in, with its role |
 | `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties:post` | how to post (form links + `gnokey` example) |
+| `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaigns` | campaigns, filterable: `?status=open\|closed\|all&tag=x&page=N` |
+| `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaigns:<id>` | campaign and its claims (`?claims=pending\|approved\|rejected\|all`), with approve/reject links |
+| `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaigns:u/<addr>` | campaigns an address posted, reviews or claimed |
+| `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaigns:post` | how to post a campaign |
 | `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/reputation` | leaderboard, latest records |
 | `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/reputation:u/<addr>` | profile: score, level, rank, work, reviews, earnings |
 | `/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/reputation:record/<id>` | a record, with each reviewer's trust when they approved |
@@ -71,6 +78,27 @@ Milestone: Pending ──Submit──▶ Submitted ──Approve × quorum──
 
 A bounty with no reviewers is reviewed by its poster. A bounty with no arbiter is arbitrated by the **council**, which follows the seat if it changes hands. The council can pause new postings, but never payouts or refunds.
 
+## Campaigns
+
+```
+Open ──Close (poster; anyone after the deadline)──▶ Closed (free slots refunded)
+Open ──(every slot paid)──▶ Closed
+
+Claim: Pending ──ApproveClaim──▶ Approved (reward paid + reputation record at 5%)
+          └─────RejectClaim───▶ Rejected (slot freed; refunded to the poster if closed)
+```
+
+| Function | Who | Notes |
+|---|---|---|
+| `PostCampaign(title, description, link, tags, reviewers, reward, slots, deadlineDays)` + `-send` | anyone (direct call) | send exactly `reward × slots`; up to 1000 slots; `deadlineDays` 0 = none |
+| `PostCampaignGRC20(tokenKey, …)` | anyone | approve the campaigns realm on the token first |
+| `Claim(id, proof)` | anyone but the poster and reviewers | one pending or approved claim per address; a pending claim reserves a slot |
+| `ApproveClaim(id, claim)` | any one reviewer | pays the reward and writes the record |
+| `RejectClaim(id, claim, reason)` | any one reviewer | the claimant may claim again while the campaign is open |
+| `Close(id)` | poster; anyone after the deadline | pending claims can still be reviewed afterwards |
+
+Each paid claim writes a reputation record at `ClaimShareBps` (5%) of a bounty milestone's weight, vouched for by the reviewer who approved it, so repeatable small tasks count without outweighing reviewed bounty work. With no reviewers the poster reviews alone, so the records carry the poster's own trust as a reviewer.
+
 ## Reputation
 
 Scoring is in `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/trust`:
@@ -95,7 +123,7 @@ func Vote(cur realm, pid int) {
 
 Also available: `Score`, `Level`, `HasScore`, `Rank`, `Top(n)`, `CompletedCount`, `ReviewCount`, `Earned(addr, denom)`, `GetRecord`, `RecordsOf`, `ReviewsOf`, `IsSeed`.
 
-Only allowlisted **writer** realms can call `AddRecord`. At launch that is just `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties`, and the admin can add more, for example a grants realm.
+Only allowlisted **writer** realms can call `AddRecord`. Those are `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties` and `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaigns`, and the admin can add more, for example a grants realm.
 
 ## Governance
 
@@ -144,15 +172,18 @@ $K maketx call $C -pkgpath gno.land/r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/g
 
 ## Deploying
 
-`scripts/deploy.sh` does steps 1 and 2: it deploys from the `mainclock` key to the Onyx testnet (`onyx-1`), leaving out test files and `testing/*`, and skips packages already on chain. Set `KEY`, `CHAIN_ID` and `REMOTE` to target another network, such as mainnet. Onyx charges a storage deposit of 100 ugnot per byte, so have a few dozen GNOT on the key.
+`scripts/deploy.sh` does steps 1 to 3: it deploys from the `mainclock` key to the Onyx testnet (`onyx-1`), leaving out test files and `testing/*`, skips packages already on chain, and registers the bounties and campaigns realms as reputation writers (step 3). Set `KEY`, `CHAIN_ID` and `REMOTE` to target another network, such as mainnet. Onyx charges a storage deposit of 100 ugnot per byte, so have a few dozen GNOT on the key.
 
 1. Deploy from the key whose address is `g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm`: only that address may publish under `r/g1lnky…/` and `p/g1lnky…/`. No namespace registration is needed. To move to a registered name later (e.g. `r/guildhall`), rewrite the paths and redeploy; realm state does not migrate.
-2. `gnokey maketx addpkg` in dependency order: `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/jsonw/v0`, `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/trust/v0`, `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounty/v0`, `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/reputation`, `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties`, `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/govdao` (optional), `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall`. Do **not** deploy `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/testing/*`.
-3. Fill in and run `scripts/bootstrap.gno`.
+2. `gnokey maketx addpkg` in dependency order: `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/jsonw/v0`, `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/trust/v0`, `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounty/v0`, `p/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaign/v0`, `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/reputation`, `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/bounties`, `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/campaigns`, `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/govdao` (optional), `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall`. Do **not** deploy `r/g1lnkytfqcjwllws63gvf0mv9yt04aswy4y9amhm/guildhall/testing/*`.
+3. As the reputation admin, `AddWriter("gno.land/r/…/guildhall/campaigns")`. The bounties realm is registered when reputation is deployed; campaigns came later, and its payouts fail until it is added.
+4. Fill in and run `scripts/bootstrap.gno`.
 
 ## Known limits (v1)
 
 - The board page scans bounties newest-first to apply filters. That's fine for thousands of bounties; add per-status and per-tag indexes before it outgrows query gas.
 - Reputation is computed once, when a record is written. Removing a seed or voiding a record doesn't unwind trust the affected account already passed on to others.
 - A trusted reviewer who funds bounties to their own sybil can mint reputation for it. The defence is social: records are public and attributable, voids are available, and seeds are chosen by the admin.
+- Campaign claims are checked by a person, not the chain: a proof link is only as good as the reviewer who opens it. Sybil accounts can each claim once, so keep rewards small or reviewers strict.
+- The landing realm (`r/…/guildhall`) predates campaigns and doesn't link to them; realms can't be changed once deployed.
 - After the work window passes, a poster can unassign a worker whose milestone has "changes requested", ending the worker's chance to dispute it. Workers should dispute promptly.

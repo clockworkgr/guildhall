@@ -6,7 +6,9 @@
 #
 # Packages that already exist on chain are skipped, so the script can be
 # rerun after a failure. The key must be the one whose address is in the
-# package paths (g1lnky...).
+# package paths (g1lnky...). Realms that write reputation records (bounties,
+# campaigns) are then registered as writers if they aren't already, which
+# needs the reputation admin's key; by default that is the same key.
 set -euo pipefail
 
 KEY=${KEY:-mainclock}
@@ -21,8 +23,10 @@ PKGS=(
   p/$A/guildhall/jsonw/v0
   p/$A/guildhall/trust/v0
   p/$A/guildhall/bounty/v0
+  p/$A/guildhall/campaign/v0
   r/$A/guildhall/reputation
   r/$A/guildhall/bounties
+  r/$A/guildhall/campaigns
   r/$A/guildhall/govdao
   r/$A/guildhall
 )
@@ -53,6 +57,21 @@ for p in "${PKGS[@]}"; do
   printf '%s\n' "$PASSWORD" | (cd "$root" && go tool gnokey maketx addpkg \
     -pkgdir "$dir" -pkgpath "gno.land/$p" \
     -gas-wanted "$GAS_WANTED" -gas-fee "$GAS_FEE" -max-deposit "$MAX_DEPOSIT" \
+    -broadcast -chainid "$CHAIN_ID" -remote "$REMOTE" \
+    -insecure-password-stdin "$KEY")
+done
+
+REPUTATION=gno.land/r/$A/guildhall/reputation
+for w in gno.land/r/$A/guildhall/bounties gno.land/r/$A/guildhall/campaigns; do
+  data=$(printf '%s.IsWriter("%s")' "$REPUTATION" "$w" | base64)
+  if curl -s "${REMOTE}/abci_query?path=%22vm/qeval%22&data=%22${data}%22" | grep -q "$(printf '(true bool)' | base64)"; then
+    echo "skip   $w (already a reputation writer)"
+    continue
+  fi
+  echo "writer $w"
+  printf '%s\n' "$PASSWORD" | (cd "$root" && go tool gnokey maketx call \
+    -pkgpath "$REPUTATION" -func AddWriter -args "$w" \
+    -gas-wanted 20000000 -gas-fee 50000ugnot -max-deposit 10000000ugnot \
     -broadcast -chainid "$CHAIN_ID" -remote "$REMOTE" \
     -insecure-password-stdin "$KEY")
 done
